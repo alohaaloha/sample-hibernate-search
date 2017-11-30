@@ -1,5 +1,14 @@
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.lucene.analysis.core.LowerCaseFilterFactory;
+import org.apache.lucene.analysis.standard.StandardTokenizerFactory;
 import org.apache.lucene.search.Query;
+import org.hibernate.search.FullTextQuery;
+import org.hibernate.search.annotations.AnalyzerDef;
+import org.hibernate.search.annotations.TokenFilterDef;
+import org.hibernate.search.annotations.TokenizerDef;
+import org.hibernate.search.batchindexing.impl.SimpleIndexingProgressMonitor;
+import org.hibernate.search.engine.ProjectionConstants;
 import org.hibernate.search.jpa.FullTextEntityManager;
 import org.hibernate.search.query.dsl.MustJunction;
 import org.hibernate.search.query.dsl.PhraseMatchingContext;
@@ -35,8 +44,11 @@ public class LuceneSearch {
      * Type of search
      * */
     public enum TypeOfSearch {
-        EXACT_PHRASE, PHRASE_WITH_WILDCARD, ANY_KEYWORD
+        PHRASE, PHRASE_WITH_WILDCARD, ANY_KEYWORD
     }
+
+    // LUCENE REMOVE SOME CHARACHETS WHEN INDEXING
+    // "+ - && || ! ( ) { } [ ] ^ \" ~ * ? : \\ /";
 
     /**
      * JPA entity manager
@@ -44,68 +56,54 @@ public class LuceneSearch {
     @PersistenceContext
     private EntityManager em;
 
-    //full text ent manager
-    private FullTextEntityManager fullTextEntityManager;
-    //hibernate query builder from full text ent manager
-    private org.hibernate.search.query.dsl.QueryBuilder queryBuilder;
-    //lucine query made using hib query builder
-    private org.apache.lucene.search.Query luceneQuery;
-    //jpa query that is created using lucene query and executed
-    private javax.persistence.Query jpaQuery;
-
-    private Query generateLuceneQuery() {
-
-        fullTextEntityManager = org.hibernate.search.jpa.Search.getFullTextEntityManager(em);
-        queryBuilder = fullTextEntityManager.getSearchFactory().buildQueryBuilder().forEntity(aClass).get();
-
-        if (typeOfSearch == TypeOfSearch.EXACT_PHRASE) {
-            System.out.println("Search for exact phrase: " + searchTerm.toLowerCase());
-            //make query
-            PhraseMatchingContext phraseMatchingContext = queryBuilder.phrase().withSlop(2).onField(fields.get(0));
-            if (fields.size() >= 2) {
-                for (int i = 1; i < fields.size(); i++) {
-                    phraseMatchingContext.andField(fields.get(i));
-                }
-            }
-            luceneQuery = phraseMatchingContext.sentence(searchTerm.toLowerCase()).createQuery();
-        } else if (typeOfSearch == TypeOfSearch.PHRASE_WITH_WILDCARD) {
-            System.out.println("Search for phrase with wildcard: " + searchTerm.toLowerCase());
-            String[] terms = searchTerm.split(" ");
-            MustJunction mustJunction = queryBuilder.bool()
-                    .must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {})).matching(terms[0].toLowerCase() + "*").createQuery());
-            for (int i = 1; i < terms.length; i++) {
-                mustJunction
-                        .must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {})).matching(terms[i].toLowerCase() + "*").createQuery());
-            }
-            luceneQuery = mustJunction.createQuery();
-        } else if (typeOfSearch == TypeOfSearch.ANY_KEYWORD) {
-            System.out.println("Search for any keyword: " + searchTerm.toLowerCase());
-            //make query
-            //option: .keyword().fuzzy()
-            luceneQuery = queryBuilder.keyword().onFields(fields.toArray(new String[] {})).matching(searchTerm.toLowerCase()).createQuery();
-        }
-
-        return luceneQuery;
-    }
-
     /**
-     * executes query and returns result data
+     * Part of query builder - executes query and returns result data
      * */
     public List<Object> getSearchResults() {
         //lucine query made using hib query builder
         generateLuceneQuery();
         //create jpa query using lucine query
-        if (to > 0 && to > from && from >= 0) {
-            jpaQuery = fullTextEntityManager.createFullTextQuery(luceneQuery, aClass).setFirstResult(from).setMaxResults(to - from);
+        if (luceneQuery != null) {
+            if (to > 0 && to > from && from >= 0) {
+                jpaQuery = fullTextEntityManager.createFullTextQuery(luceneQuery, aClass).setFirstResult(from).setMaxResults(to - from);
+            } else {
+                jpaQuery = fullTextEntityManager.createFullTextQuery(luceneQuery, aClass);
+            }
+            //execute jpa query query
+            return jpaQuery.getResultList();
         } else {
-            jpaQuery = fullTextEntityManager.createFullTextQuery(luceneQuery, aClass);
+            return new ArrayList<>();
         }
-        //execute jpa query query
-        return jpaQuery.getResultList();
+
     }
 
     /**
-     * executes query and returns result size
+     * Part of query builder - executes query and returns result data with metadata
+     * */
+    public List<Object[]> getSearchResultsWithMetadata() {
+        //lucine query made using hib query builder
+        generateLuceneQuery();
+        //create jpa query using lucine query
+        if (luceneQuery != null) {
+            if (to > 0 && to > from && from >= 0) {
+                jpaQuery = fullTextEntityManager.createFullTextQuery(luceneQuery, aClass)
+                        .setProjection(ProjectionConstants.SCORE, ProjectionConstants.THIS, FullTextQuery.SCORE)
+                        //.setProjection(FullTextQuery.SCORE, FullTextQuery.THIS)
+                        .setFirstResult(from).setMaxResults(to - from);
+            } else {
+                jpaQuery = fullTextEntityManager.createFullTextQuery(luceneQuery, aClass);
+            }
+            //execute jpa query query
+            return jpaQuery.getResultList();
+        } else {
+            return new ArrayList<>();
+        }
+
+    }
+
+    /**
+     * Part of query builder - executes query and returns result size
+     *
      * */
     public int getSearchResultsCount() {
         //lucine query made using hib query builder
@@ -113,6 +111,86 @@ public class LuceneSearch {
         //create and execute jpa query using lucine query
         return fullTextEntityManager.createFullTextQuery(luceneQuery, aClass).getResultSize();
     }
+
+    /**
+     * Rebuilds search index
+     *
+     * */
+    public static void rebuildIndex(EntityManager em) throws InterruptedException {
+        System.out.println("Rebuilding search index ...");
+        // Using an EntityManager (JPA) to rebuild an index//
+        FullTextEntityManager fullTextEntityManager = org.hibernate.search.jpa.Search.getFullTextEntityManager(em);
+        // fullTextEntityManager.createIndexer().startAndWait();
+
+        fullTextEntityManager.createIndexer().purgeAllOnStart(true) // true by default, highly recommended
+                .optimizeAfterPurge(true) // true is default, saves some disk space
+                .optimizeOnFinish(true) // true by default
+                .progressMonitor(new SimpleIndexingProgressMonitor(50000)) // reduce amount of logging
+                .startAndWait();
+    }
+
+    private Query generateLuceneQuery() {
+
+        fullTextEntityManager = org.hibernate.search.jpa.Search.getFullTextEntityManager(em);
+        queryBuilder = fullTextEntityManager.getSearchFactory().buildQueryBuilder().forEntity(aClass).get();
+
+        if (searchTerm != null) {
+
+            // prepare term
+            searchTerm = searchTerm.toLowerCase();
+            searchTerm = StringUtils.normalizeSpace(searchTerm.replaceAll("[-+&|!(){}^\"~*?:@\\/]+", " "));
+
+            if (!searchTerm.equals(" ") && !searchTerm.equals("")) {
+
+                if (typeOfSearch == TypeOfSearch.PHRASE) {
+
+                    System.out.println("Search for exact phrase: " + searchTerm);
+                    //make query
+                    PhraseMatchingContext phraseMatchingContext = queryBuilder.phrase().withSlop(10).onField(fields.get(0));
+                    if (fields.size() >= 2) {
+                        for (int i = 1; i < fields.size(); i++) {
+                            phraseMatchingContext.andField(fields.get(i));
+                        }
+                    }
+                    luceneQuery = phraseMatchingContext.sentence(searchTerm).createQuery();
+
+                } else if (typeOfSearch == TypeOfSearch.PHRASE_WITH_WILDCARD) {
+
+                    System.out.println("Search for phrase with wildcard: " + searchTerm);
+                    String[] terms = searchTerm.split(" ");
+                    MustJunction mustJunction = queryBuilder.bool()
+                            .must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {})).matching(terms[0] + "*").createQuery());
+                    for (int i = 1; i < terms.length; i++) {
+                        mustJunction.must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {})).matching(terms[i] + "*").createQuery());
+                    }
+                    luceneQuery = mustJunction.createQuery();
+
+                } else if (typeOfSearch == TypeOfSearch.ANY_KEYWORD) {
+
+                    System.out.println("Search for any keyword: " + searchTerm);
+                    //make query
+                    //option: .keyword().fuzzy()
+                    luceneQuery = queryBuilder.keyword().onFields(fields.toArray(new String[] {})).matching(searchTerm).createQuery();
+
+                }
+
+            }
+        }
+
+        return luceneQuery;
+    }
+
+    //full text ent manager
+    private FullTextEntityManager fullTextEntityManager;
+
+    //hibernate query builder from full text ent manager
+    private org.hibernate.search.query.dsl.QueryBuilder queryBuilder;
+
+    //lucine query made using hib query builder
+    private org.apache.lucene.search.Query luceneQuery;
+
+    //jpa query that is created using lucene query and executed
+    private javax.persistence.Query jpaQuery;
 
     int to = 0;
 
