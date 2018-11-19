@@ -1,63 +1,55 @@
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.lucene.analysis.core.LowerCaseFilterFactory;
-import org.apache.lucene.analysis.standard.StandardTokenizerFactory;
 import org.apache.lucene.search.Query;
 import org.hibernate.search.FullTextQuery;
-import org.hibernate.search.annotations.AnalyzerDef;
-import org.hibernate.search.annotations.TokenFilterDef;
-import org.hibernate.search.annotations.TokenizerDef;
 import org.hibernate.search.batchindexing.impl.SimpleIndexingProgressMonitor;
 import org.hibernate.search.engine.ProjectionConstants;
 import org.hibernate.search.jpa.FullTextEntityManager;
 import org.hibernate.search.query.dsl.MustJunction;
 import org.hibernate.search.query.dsl.PhraseMatchingContext;
+import org.json.JSONObject;
 
-import javax.ejb.Stateless;
 import javax.persistence.EntityManager;
-import javax.persistence.PersistenceContext;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * Created by r.marinkovic on 5/24/2017.
  *
- *  getting started:    http://hibernate.org/search/documentation/getting-started/
- *  making queries:     https://docs.jboss.org/hibernate/search/4.5/reference/en-US/html/search-query.html#search-query-querydsl
- *  mapping:            http://docs.jboss.org/hibernate/stable/search/reference/en-US/html_single/#search-mapping-associated
- *  usage example:
- *   List<Object> res = luceneSearch
+ *  - getting started:    http://hibernate.org/search/documentation/getting-started/
+ *
+ *  - making queries:     https://docs.jboss.org/hibernate/search/4.5/reference/en-US/html/search-query.html#search-query-querydsl
+ *
+ *  - mapping:            http://docs.jboss.org/hibernate/stable/search/reference/en-US/html_single/#search-mapping-associated
+ *
+ *  - usage example:
+ *    List<Object> res = luceneSearch
  *      .onClass(RouterInterface.class)
  *      .searchTerm(searchTerm)
  *      .from(from)
  *      .to(to)
- *      .typeOfSearch(LuceneSearch.TypeOfSearch.PHRASE_WITH_WILDCARD)
+ *      .typeOfSearch(LuceneSearch.TypeOfSearch.ALL_WORDS_WITH_WILDCARD)
  *      .onField("name")
  *      .onField("router.ipAddress")
  *      .getSearchResults(); // or .getSearchResultsCount();
  *
+ *  - lucene removes characters when indexing:
+ *      + - && || ! ( ) { } [ ] ^ \" ~ * ? : \\ /
+ *      pattern: .replaceAll("[-+&|!(){}^\"~\\[\\]*?:@$%=,\\/]+", " ")
+ *
  */
-@Stateless
 public class LuceneSearch {
 
     /**
      * Type of search
+     *
      * */
     public enum TypeOfSearch {
-        PHRASE, PHRASE_WITH_WILDCARD, ANY_KEYWORD
+        ALL_WORDS_EXACT, ALL_WORDS_WITH_WILDCARD, ANY_WORD
     }
 
-    // LUCENE REMOVE SOME CHARACHETS WHEN INDEXING
-    // "+ - && || ! ( ) { } [ ] ^ \" ~ * ? : \\ /";
-
     /**
-     * JPA entity manager
-     * */
-    @PersistenceContext
-    private EntityManager em;
-
-    /**
-     * Part of query builder - executes query and returns result data
+     * Executes query and returns result data
+     *
      * */
     public List<Object> getSearchResults() {
         //lucine query made using hib query builder
@@ -74,11 +66,11 @@ public class LuceneSearch {
         } else {
             return new ArrayList<>();
         }
-
     }
 
     /**
-     * Part of query builder - executes query and returns result data with metadata
+     * Executes query and returns result data with metadata
+     *
      * */
     public List<Object[]> getSearchResultsWithMetadata() {
         //lucine query made using hib query builder
@@ -98,18 +90,21 @@ public class LuceneSearch {
         } else {
             return new ArrayList<>();
         }
-
     }
 
     /**
-     * Part of query builder - executes query and returns result size
+     * Executes query and returns result size
      *
      * */
     public int getSearchResultsCount() {
         //lucine query made using hib query builder
         generateLuceneQuery();
         //create and execute jpa query using lucine query
-        return fullTextEntityManager.createFullTextQuery(luceneQuery, aClass).getResultSize();
+        if (luceneQuery != null) {
+            return fullTextEntityManager.createFullTextQuery(luceneQuery, aClass).getResultSize();
+        } else {
+            return 0;
+        }
     }
 
     /**
@@ -129,49 +124,116 @@ public class LuceneSearch {
                 .startAndWait();
     }
 
+    /**
+     * Returns search term for query builder - with or without wildcard based on start character '='
+     *
+     * */
+    private String addWildcardIfNeeded(String term) {
+        if (term.startsWith("=")) {
+            term = term.replaceFirst("=", "");
+        } else {
+            term = term + "*";
+        }
+        return term;
+    }
+
+    /**
+     * check if search param is JSON object
+     *
+     * */
+    private boolean isFieldSpecificSearch(String term) {
+        try {
+            JSONObject jsonObject = new JSONObject(term);
+        } catch (Exception e) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Generate lucene query
+     *
+     * */
     private Query generateLuceneQuery() {
 
-        fullTextEntityManager = org.hibernate.search.jpa.Search.getFullTextEntityManager(em);
+        fullTextEntityManager = org.hibernate.search.jpa.Search.getFullTextEntityManager(entityManager);
         queryBuilder = fullTextEntityManager.getSearchFactory().buildQueryBuilder().forEntity(aClass).get();
 
         if (searchTerm != null) {
 
-            // prepare term
-            searchTerm = searchTerm.toLowerCase();
-            searchTerm = StringUtils.normalizeSpace(searchTerm.replaceAll("[-+&|!(){}^\"~*?:@\\/]+", " "));
+            System.out.println("Searching " + typeOfSearch + " : " + searchTerm);
 
-            if (!searchTerm.equals(" ") && !searchTerm.equals("")) {
+            if (!searchTerm.equals("")) {
 
-                if (typeOfSearch == TypeOfSearch.PHRASE) {
+                if (isFieldSpecificSearch(searchTerm)) {
 
-                    System.out.println("Search for exact phrase: " + searchTerm);
-                    //make query
-                    PhraseMatchingContext phraseMatchingContext = queryBuilder.phrase().withSlop(10).onField(fields.get(0));
-                    if (fields.size() >= 2) {
-                        for (int i = 1; i < fields.size(); i++) {
-                            phraseMatchingContext.andField(fields.get(i));
+                    JSONObject jsonObject = new JSONObject(searchTerm);
+                    MustJunction mustJunction = null;
+
+                    int init = 0;
+                    for (int i = 0; i < jsonObject.keySet().size(); i++) {
+                        String field = (String) jsonObject.keySet().toArray()[i];
+                        String value = jsonObject.get(field).toString().toLowerCase().trim();
+
+                        if (SearchEntityFields.SEARCH_ENTITY_FIELDS.get(aClass).contains(field) && !value.equals("")) {
+                            if (i == init) {
+                                //make mustJunction
+                                if (value.split(" ").length != 1) {
+                                    mustJunction = queryBuilder.bool().must(queryBuilder.phrase().withSlop(10).onField(field).sentence(value).createQuery());
+                                } else {
+                                    mustJunction = queryBuilder.bool()
+                                            .must(queryBuilder.keyword().wildcard().onFields(field).matching(addWildcardIfNeeded(value)).createQuery());
+                                }
+                            } else {
+                                //append
+                                if (value.split(" ").length != 1) {
+                                    mustJunction.must(queryBuilder.phrase().withSlop(10).onField(field).sentence(value).createQuery());
+                                } else {
+                                    mustJunction.must(queryBuilder.keyword().wildcard().onFields(field).matching(addWildcardIfNeeded(value)).createQuery());
+                                }
+                            }
+                        } else {
+                            init++;
                         }
                     }
-                    luceneQuery = phraseMatchingContext.sentence(searchTerm).createQuery();
 
-                } else if (typeOfSearch == TypeOfSearch.PHRASE_WITH_WILDCARD) {
-
-                    System.out.println("Search for phrase with wildcard: " + searchTerm);
-                    String[] terms = searchTerm.split(" ");
-                    MustJunction mustJunction = queryBuilder.bool()
-                            .must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {})).matching(terms[0] + "*").createQuery());
-                    for (int i = 1; i < terms.length; i++) {
-                        mustJunction.must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {})).matching(terms[i] + "*").createQuery());
+                    if (mustJunction != null) {
+                        luceneQuery = mustJunction.createQuery();
                     }
-                    luceneQuery = mustJunction.createQuery();
 
-                } else if (typeOfSearch == TypeOfSearch.ANY_KEYWORD) {
+                } else {
 
-                    System.out.println("Search for any keyword: " + searchTerm);
-                    //make query
-                    //option: .keyword().fuzzy()
-                    luceneQuery = queryBuilder.keyword().onFields(fields.toArray(new String[] {})).matching(searchTerm).createQuery();
+                    searchTerm = searchTerm.toLowerCase().trim();
 
+                    if (typeOfSearch == TypeOfSearch.ALL_WORDS_EXACT) {
+
+                        PhraseMatchingContext phraseMatchingContext = queryBuilder.phrase().withSlop(10).onField(fields.get(0));
+                        if (fields.size() >= 2) {
+                            for (int i = 1; i < fields.size(); i++) {
+                                phraseMatchingContext.andField(fields.get(i));
+                            }
+                        }
+                        luceneQuery = phraseMatchingContext.sentence(searchTerm).createQuery();
+
+                    } else if (typeOfSearch == TypeOfSearch.ALL_WORDS_WITH_WILDCARD) {
+
+                        String[] terms = searchTerm.split(" ");
+                        //make mustJunction
+                        MustJunction mustJunction = queryBuilder.bool().must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {}))
+                                .matching(addWildcardIfNeeded(terms[0])).createQuery());
+                        for (int i = 1; i < terms.length; i++) {
+                            //append
+                            mustJunction.must(queryBuilder.keyword().wildcard().onFields(fields.toArray(new String[] {}))
+                                    .matching(addWildcardIfNeeded(terms[i])).createQuery());
+                        }
+                        luceneQuery = mustJunction.createQuery();
+
+                    } else if (typeOfSearch == TypeOfSearch.ANY_WORD) {
+
+                        //option: .keyword().fuzzy()
+                        luceneQuery = queryBuilder.keyword().onFields(fields.toArray(new String[] {})).matching(searchTerm).createQuery();
+
+                    }
                 }
 
             }
@@ -192,24 +254,36 @@ public class LuceneSearch {
     //jpa query that is created using lucene query and executed
     private javax.persistence.Query jpaQuery;
 
-    int to = 0;
+    //entity manager
+    private EntityManager entityManager;
+
+    public LuceneSearch(EntityManager entityManager) {
+        this.entityManager = entityManager;
+    }
+
+    private int to = 0;
 
     public LuceneSearch to(int to) {
         this.to = to;
         return this;
     }
 
-    int from = 0;
+    private int from = 0;
 
     public LuceneSearch from(int from) {
         this.from = from;
         return this;
     }
 
-    private ArrayList<String> fields = new ArrayList<>();
+    private List<String> fields = new ArrayList<>();
 
     public LuceneSearch onField(String field) {
         this.fields.add(field);
+        return this;
+    }
+
+    public LuceneSearch onFields(List<String> fields) {
+        this.fields.addAll(fields);
         return this;
     }
 
@@ -217,7 +291,7 @@ public class LuceneSearch {
 
     public LuceneSearch onClass(Class<?> aClass) {
         this.aClass = aClass;
-        this.fields = new ArrayList<>(); //reset current(old) fields
+        this.fields = new ArrayList<>(); //reset fields if same instance of luceneSearch is used
         return this;
     }
 
